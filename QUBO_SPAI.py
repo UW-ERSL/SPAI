@@ -1,8 +1,3 @@
-# Reference
-# Computing a Sparse Approximate Inverse for 2D Finite Difference Poisson Problems on Quantum Annealing Machin
-# Authors: Sanjay Suresh, Krishnan Suresh
-# Email: ksuresh@wisc.edu
-
 from dimod.reference.samplers import ExactSolver
 from dwave.system import DWaveSampler, EmbeddingComposite
 
@@ -14,7 +9,7 @@ import matplotlib.pyplot as plt
 import time
 from pyqubo import Placeholder,Array
 from tqdm import tqdm
-#import dwave.inspector
+
 
 def assignMaterial(materialScenario,gridX,gridY): 
     # We can assign different materials to different 'elements' in the grid
@@ -157,7 +152,7 @@ def createModelWithPlaceHolders():
     return model
 
 
-def QUBOApproximateInverse(K,model, boxMaxIteration = 50, boxTolerance = 1e-6,boxL = 1): 
+def QUBOApproximateInverse(K,model): 
     nDimensions = K.shape[0]
     M = scipy.sparse.csc_matrix.copy(K)  
     dictionary = {}  
@@ -166,22 +161,23 @@ def QUBOApproximateInverse(K,model, boxMaxIteration = 50, boxTolerance = 1e-6,bo
         if (exploitNodeCongruency):
             congruentNode = nodeCongruency[node]
             if (congruentNode == node):
-                x = QUBOBoxSolve(K,col,M,model,boxMaxIteration = boxMaxIteration,boxTolerance = boxTolerance,boxL = boxL )
+                x = QUBOBoxSolve(K,col,model)
                 dictionary[node] = x
             else:
                 x = dictionary[congruentNode]
         else:  
-            x = QUBOBoxSolve(K,col,M,model,boxMaxIteration = boxMaxIteration,boxTolerance = boxTolerance,boxL = boxL )
+            x = QUBOBoxSolve(K,col,model)
             
         nonzeros = K.indptr[col+1]- K.indptr[col]    
         for k in range(nonzeros):
             M.data[K.indptr[col]+k] = x[k]
-    print("")       
+    print("")    
+    M = (M+ M.transpose())/2 # force symmetry
     return M
 
-def QUBOBoxSolve(K, col, M, model, boxL = 1, boxMaxIteration = 50, boxTolerance = 1e-6):
-    global totalBoxIterations
-    global totalBoxTime
+def QUBOBoxSolve(K, col, model):
+    global totalQUBOSolves
+    global totalQUBOSolveTime
     nonzeros = K.indptr[col+1]- K.indptr[col]
     maxSparsity = 5 # Don't modify; finite difference of Poisson problem
     if (nonzeros > maxSparsity):
@@ -198,26 +194,25 @@ def QUBOBoxSolve(K, col, M, model, boxL = 1, boxMaxIteration = 50, boxTolerance 
         A[i] = maxSparsity*[0]#numerical
 
     PEMin = 0
-
+    
     for  i in range(nonzeros):
         row_i = K.indices[K.indptr[col]+i]
-        if  (row_i < col): # exploiting symmetry
-            continue
         for j in range(nonzeros):
             row_j = K.indices[K.indptr[col]+j]
-            if  (row_j < col): # exploiting symmetry
-                continue
             A[i][j] = K[row_i,row_j]  
         if (row_i == col):
             b[i] = 1
     modelDictionary = {}
+    
     for  i in range(maxSparsity):
         modelDictionary['b[%d]' %i] = b[i]
         for j in range(maxSparsity):
             modelDictionary["A[{i}][{j}]".format(i = i, j = j)] = A[i][j]
-            
+    
+    L = boxL
+    
     for iteration in range(boxMaxIteration):   
-        modelDictionary['L'] =  boxL
+        modelDictionary['L'] =  L
         for  i in range(maxSparsity):
             modelDictionary['c[%d]' %i] = center[i]
         
@@ -226,33 +221,30 @@ def QUBOBoxSolve(K, col, M, model, boxL = 1, boxMaxIteration = 50, boxTolerance 
         if (samplingMethod == 0):
             results = sampler.sample(bqm)
         else:
-            results = sampler.sample(bqm, num_reads = nSamples) 
+            results = sampler.sample(bqm, num_reads = nSamples)
+            #import dwave.inspector
             #dwave.inspector.show(results); input('')
+            
         tEnd = time.time()
-        totalBoxTime = totalBoxTime + (tEnd - tStart)
+        totalQUBOSolveTime = totalQUBOSolveTime + (tEnd - tStart)
         sample = results.first.sample
         PE = results.first.energy 
-        if (boxL < boxTolerance):
+        if (L < boxTolerance):
             break
         if (PE < PEMin): # Translation
             for i in range(maxSparsity):
-                if (i < nonzeros):
-                    row = K.indices[K.indptr[col]+i]
-                    if (row<col):
-                        center[i]= M[col,row]
-                        continue
                 qSol1[i]= sample["q1["+str(i)+"]"] 
                 qSol2[i]= sample["q2["+str(i)+"]"]       
-                center[i] = center[i] + boxL*(-2*qSol1[i] + qSol2[i])
-            PEMin = PE             
+                center[i] = center[i] + L*(-2*qSol1[i] + qSol2[i])
+            PEMin = PE     
+            
         else:# Contraction only if we don't translate
-            boxL = boxL/2
-    if (boxL> boxTolerance):
+            L = L/2
+    if (L> boxTolerance):
         print("Box method did not converge to desired tolerance")
-    #print("avg time:", tTotal/(iteration+1))
-    #print("iterations:", iteration)
-    
-    totalBoxIterations = totalBoxIterations + iteration
+
+ 
+    totalQUBOSolves = totalQUBOSolves + iteration
     return center
 
 def plotField(gridX,gridY):
@@ -280,8 +272,8 @@ if __name__ == "__main__":
     # Specify the number of unknowns (interior grid nodes)
     # gridX: The number of nodes along X (>= 2) 
     # gridY: The number of nodes along Y (>= 2)
-    gridX = 41
-    gridY = 31
+    gridX = 401
+    gridY = 301
     gridX = gridX + (gridX % 2) - 1 # convenient to have odd number of nodes
     gridY = gridY + (gridY % 2) - 1 #  convenient to have odd number of nodes
     
@@ -296,7 +288,7 @@ if __name__ == "__main__":
     # 0: for exact (symbolic) solve of QUBO
     # 1: for DWAVE quantum annealing of QUBO with nSamples
     samplingMethod = 0 
-    nSamples = 100  # relevant only when samplingMethod = 1
+    nSamples = 50  # relevant only when samplingMethod = 1
     
     # boxTolerance, boxMaxIteration 
     # boxTolerance: typical value of 1e-6
@@ -318,24 +310,16 @@ if __name__ == "__main__":
     experiment = 1
     
     if (experiment == 1):
-        gridX = 41
-        gridY = 31
+        gridX = 401
+        gridY = 301
     elif (experiment == 2):
-        gridX = 401
-        gridY = 301
-    elif (experiment == 3):
-        gridX = 401
-        gridY = 301
         materialScenario = 1 
         kMaterial = [1,100]
+    elif (experiment == 3):
+         boxTolerance = 1e-7
     elif (experiment == 4):
-         gridX = 401
-         gridY = 301
-         boxTolerance = 1e-4
-    elif (experiment == 5):
-         gridX = 401
-         gridY = 301
-         boxL = 100
+         boxL = 0.01
+
          
     #######################################################
     # Main code starts here
@@ -354,7 +338,7 @@ if __name__ == "__main__":
     #%% CG without preconditioner
     nrmConvergence = []
     st = time.time()
-    u, exit_code = cg(K, f, tol = CGtol,callback = CGcallBackFunction)
+    u, exit_code = cg(K, f, tol = CGtol,maxiter = 10000,callback = CGcallBackFunction)
     et = time.time()
     print("CG Iters:",len(nrmConvergence))
     print("Time to perform CG:",et-st)
@@ -379,14 +363,15 @@ if __name__ == "__main__":
         sampler = EmbeddingComposite(DWaveSampler())
              
     #%% Compute SPAI M
-    totalBoxIterations = 0
-    totalBoxTime = 0
+    totalQUBOSolves = 0
+    totalQUBOSolveTime = 0
     st = time.time()
-    M = QUBOApproximateInverse(K,model,boxTolerance=boxTolerance, boxMaxIteration = boxMaxIteration,boxL = boxL)
+    M = QUBOApproximateInverse(K,model)
     et = time.time()
     print("Time to compute M:",et-st)
-    print("totalBoxIterations:",totalBoxIterations)
-    print("totalBoxTime:",totalBoxTime)
+    print("totalQUBOSolves:",totalQUBOSolves)
+    print("totalQUBOSolveTime:",totalQUBOSolveTime)
+    
     
     #%% Q-PCG 
     nrmConvergence = []
